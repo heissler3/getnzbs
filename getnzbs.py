@@ -1,0 +1,604 @@
+#!/usr/bin/env python3
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+# Henry Eissler III
+#
+# query Newznab servers
+# (see getnzbs.py --help for query options)
+#
+# uses ncurses interface.  120 columns or more preferred
+# spacebar queues item -- return fetches
+# see "User/Machine Specific" for destination path
+
+import os, sys, tomllib, argparse
+import threading, queue
+import curses
+from curseslistwindow import *
+from time import sleep
+import urllib.request as urlreq
+from urllib.error import *
+from urllib.parse import urlencode
+import xml.etree.ElementTree as ET
+
+#~~~ Constants ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+version = '0.4.4'
+ua = 'getnzbs/' + version
+config_file_paths = [ './getnzbs.conf', os.environ['HOME']+'/.config/getnzbs.conf', ]
+
+#~~~ Globals ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+results = []        # query results - a list of dicts
+                    #   keys: 'title', 'pubDate', 'link',
+                    #         'category', 'size', 'fetched'
+displaylist = []    # strings (or chars) to display
+totalscreen = None  # primary curses window
+headerwin = None
+mainwin = None
+footerwin = None
+displayqueue = queue.SimpleQueue()
+
+#~~~ Curses functions ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+def init_screen():
+    scr = curses.initscr()
+    curses.noecho()
+    curses.cbreak()
+    scr.keypad(True)
+    if curses.has_colors():
+        curses.start_color()
+        curses.init_pair(1, curses.COLOR_WHITE,
+                            curses.COLOR_BLUE)
+        curses.init_pair(2, curses.COLOR_WHITE,
+                            curses.COLOR_RED)
+        curses.init_pair(3, curses.COLOR_YELLOW,
+                            curses.COLOR_BLUE)
+        curses.init_pair(4, curses.COLOR_YELLOW,
+                            curses.COLOR_BLACK)
+    curses.curs_set(0)
+    #curses.mousemask(0x00210002) # BUTTON1_PRESSED | scrollup | scrolldown
+    curses.mousemask(curses.ALL_MOUSE_EVENTS)
+    scr.nodelay(True)
+    return scr
+
+def divide_screen(scr):
+    global headerwin, mainwin, footerwin
+    scr.clear()
+    maxrows, maxcols = scr.getmaxyx()
+    subheight = maxrows - 5
+    
+    if headerwin:
+        headerwin.resize(2, maxcols)
+        win1 = headerwin
+    else:
+        win1 = curses.newwin(2, maxcols, 0, 0)
+        win1.attron(curses.color_pair(1)|curses.A_BOLD)
+        win1.bkgd(' ',curses.color_pair(1)|curses.A_BOLD)
+    scr.hline(2, 0, curses.ACS_HLINE, maxcols)
+
+    if mainwin:
+        mainwin.resize(subheight, maxcols)
+        win2 = mainwin
+    else:
+        win2 = curses.newwin(subheight, maxcols, 3, 0)
+    scr.hline(maxrows-2, 0, curses.ACS_HLINE, maxcols)
+
+    if footerwin:
+        footerwin.resize(1, maxcols)
+        footerwin.mvwin(maxrows-1, 0)
+        win3 = footerwin
+    else:
+        win3 = curses.newwin(1, maxcols, maxrows-1, 0)
+    
+    scr.refresh()
+    return win1, win2, win3
+
+def demolish_screen(scr):
+    curses.nocbreak()
+    scr.keypad(False)
+    curses.echo()
+    curses.endwin()
+
+def write_header(message, attr):
+    global headerwin
+    maxcol = headerwin.getmaxyx()[1] - 1
+    headerwin.move(0, 0)
+    headerwin.clrtoeol()
+    if len(message) < maxcol:
+        headerwin.addstr(0, 1, message, (attr | curses.A_BOLD))
+    headerwin.refresh()    
+
+def write_status(status):
+    """ for debugging purposes only
+    """
+    global headerwin
+    maxcol = headerwin.getmaxyx()[1] - 1
+    headerwin.move(1, 0)
+    headerwin.clrtoeol()
+    if len(status) < maxcol:
+        #headerwin.addstr(1, maxcol - len(status) - 1, status, curses.A_BOLD)
+        headerwin.addstr(1, 1, status, curses.A_BOLD)
+        headerwin.refresh()
+
+def write_footer(message):
+    global footerwin
+    footerline = footerwin.getmaxyx()[0] - 1
+    footerwin.addstr(footerline, 5, message)
+    footerwin.clrtoeol()
+    footerwin.refresh()
+
+#~~~ Curses Objects ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+class NzbHeaderListWindow(MultiColumnListWindow):
+    """
+    multi-column curses window; specialized, not adaptable,
+    so 'colwidths' is hard-coded, not passed in.
+    data is a list of lists of strings or chars
+    'len(data[n])' == 'len(colwidths)' == 'numcols',
+    so there is some redundancy.
+    """
+
+    def __init__(self, window, data, colwidths=[4, 1, 0, 22, 11]):
+        super().__init__(window, data, colwidths)
+        self.fetched = [False for x in range(len(data))]
+
+    def write_row(self, index):
+        details = self.list[index]
+        line = index - self.offset
+        if line < 0 or line > (self.line_count - 1):
+            return
+        attr = (curses.color_pair(3)|curses.A_BOLD) if (index == self.current) else 0
+        if self.fetched[index]:
+            details[1] = 'X'
+            if index != self.current:
+                attr |= curses.color_pair(4)
+            else:
+                attr = (curses.color_pair(2) | curses.A_BOLD)
+        elif self.selected[index]:
+            details[1] = '-'
+            attr |= curses.A_BOLD
+        else:
+            details[1] = ' '
+        for n in range(self.numcols):
+            self.subwin[n].move(line, 0)
+            self.subwin[n].clrtoeol()
+            if len(details[n]) > self.colwidths[n]:
+                self.subwin[n].insnstr(details[n], self.colwidths[n], attr)
+            elif len(details[n]) > 1:
+                self.subwin[n].insstr(details[n], attr)
+            else:
+                self.subwin[n].insch(details[n], attr)
+
+    def new_data(self, data):
+        super().new_data(data)
+        self.fetched = [False for x in range(len(data))]
+
+    def write_status_spinner(self, index, thread):
+        i = 0
+        while thread.is_alive():
+            line = index - self.offset
+            if line >= 0 and line < self.line_count:
+                ch = ('|', '/', '-', '\\')[i % 4]
+                displayqueue.put((self.subwin[1].delch, (line, 0)))
+                displayqueue.put((self.subwin[1].insch, (line, 0, ch)))
+                displayqueue.put((self.subwin[1].noutrefresh, ()))
+                i += 1
+            sleep(.25)
+
+#~~~ Misc. functions  ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+def config_not_found():
+    ( txtnorm, txtbold, txtred, txtblue, txtamber, ) = map(lambda s: "\x1b["+s, [ "0m", "1;37m", "1;31m", "1;34m", "33m", ])
+    print("Configuration file not found.\n", file=sys.stderr)
+    resp = input(f"Would you like to create one? {txtbold}(y/n){txtnorm}: ")
+    if not resp or resp.lower()[0] != 'y':
+        print("Well, sorry, but no servers are defined, so there's nothing to do.", file=sys.stderr)
+        exit()
+    cfgfile = open('./getnzbs.conf', 'w', encoding='utf-8')
+    cfgfile.write("[defaults]\n")
+    resp = input(f"Please enter the directory path to save nzbs to ({txtbold}default{txtnorm}: {os.environ['HOME']}/Downloads/nzbs/): ")
+    if not resp:
+        destdir = os.environ['HOME'] + '/Downloads/nzbs/'
+    elif not os.path.isdir(resp):
+        yn = input(f"Sorry, {resp} directory does not exist.  Create it? {txtbold}(y/n){txtnorm}: ")
+        if yn and yn.lower()[0] == 'y':
+            try:
+                os.mkdir(resp)
+                destdir = resp
+            except(Exception):
+                print(f"Error trying to create directory {resp}!\nBailing now.", file=sys.stderr)
+                cfgfile.close()
+                os.remove('./getnzbs.conf')
+                exit()
+    else:
+        destdir = resp
+    cfgfile.write(f"DestinationDirectory = \"{destdir}\"\n")
+    resp = input(f"Please enter the maximum number of results per request ({txtbold}default{txtnorm}: 300): ")
+    if not resp:
+        maxresults = 300
+    elif not resp.isdecimal():
+        print(f"{resp} is not a number.  Moving on...")
+        maxresults = 100
+    cfgfile.write(f"MaxResults = {maxresults}\n\n")
+    enterserver = ( input(f"Would you like to enter server information? {txtbold}(y/n){txtnorm}?").lower().startswith('y') )
+    while enterserver:
+        serv_name = input(f"Please enter a name for the server: ")
+        serv_url = input(f"Please enter a valid api url for the server: ")
+        serv_key = input(f"Finally, please enter your api key for the server ({txtbold}default{txtnorm} \"0\"): ")
+        # serv_key = serv_key if serv_key else "0"
+        serv_key = serv_key or "0"
+        cfgfile.write(f"[server.{serv_name}]\nURL = \"{serv_url}\"\nApiKey = \"{serv_key}\"\n\n")
+        enterserver = ( input(f"Would you like to enter another? {txtbold}(y/n){txtnorm}?").lower().startswith('y') )
+    cfgfile.close()
+    exit()
+
+def dispatch_fetch():
+    """
+    to be run in a seperate thread
+    which creates another thread,
+    and then calls the spinner routine
+    """
+    global  results, listwin, headerwin, totalscreen
+    mx = headerwin.getmaxyx()[1] - 1
+    for idx in range(len(results)):
+        if listwin.selected[idx]:
+            fetch = FetchNZBThread(results[idx])
+            fetch.start()
+            listwin.write_status_spinner(idx, fetch)
+
+            if fetch.success:
+                listwin.fetched[idx] = True
+            listwin.selected[idx] = False
+            displayqueue.put((listwin.write_row, (idx,)))
+            displayqueue.put((listwin.refresh_list, ()))
+
+def monitor_display_queue():
+    """
+    to be run in a seperate thread
+    from the key input loop,
+    so that they can both be blocking
+    """
+    while True:
+        (wfunc, cargs) = displayqueue.get(True) # blocking
+        if len(cargs) > 0:
+            wfunc(*cargs)
+        else:
+            if wfunc == -1:
+                break
+            else:
+                wfunc()
+        curses.doupdate()
+
+def choose_category():
+    global listwin, mainwin, parameters, displaylist
+    categories = []
+
+    listwin = SelectFromListWindow(mainwin, displaylist)
+    listwin.draw_window()
+    write_status("Retrieving Category List")
+
+    capsquery = servers[args.server]['url'] + '/api?' + urlencode({'t':'caps','apikey':servers[args.server]['key']})
+    capsrequest = urlreq.Request(capsquery, headers={'User-Agent':ua})
+
+    try:
+        capsresponse = urlreq.urlopen(capsrequest).read().decode()
+        xmlroot = ET.fromstring(capsresponse)
+        qresults = xmlroot.findall('.//category')
+    except (URLError, HTTPError) as e:
+        print("Retrieval Error " + e)
+        exit(1)
+
+    for cat in qresults:
+        for subcat in cat.iter():
+            d = subcat.attrib
+            d['type'] = subcat.tag
+            categories.append(d)
+            displayline = "{:<4}:  {:<24}".format(d['id'], d['name'])
+            if d['type'] == 'subcat':
+                displayline = ' '*4 + displayline
+            displaylist.append(displayline)
+
+    listwin.new_data(displaylist)
+    listwin.draw_list()
+    write_footer("Press 'Q' to quit,  'Space' to select,  'Enter' to choose")
+    while True:
+        key = totalscreen.getch()
+        handled = listwin.keypress(key)
+        if not handled:
+            if key in (ord('q'), ord('Q')):
+                demolish_screen(totalscreen)
+                exit(0)
+            elif key in (ord('\n'), curses.KEY_ENTER):
+                cats = []
+                for sc in range(len(listwin.selected)):
+                    if listwin.selected[sc]:
+                        cats.append(categories[sc]['id'])
+                parameters['cat'] = ','.join(cats)
+                displaylist = []
+                write_status('')
+                return
+            elif key == curses.KEY_RESIZE:
+                (headerwin, mainwin, fooerwin) = divide_screen(totalscreen)
+                listwin = SelectFromListWindow(mainwin, displaylist)
+                listwin.draw_window()
+
+def human(size):
+    """ Return human-readable string for byte size value
+    with appropriate suffix.
+
+    Takes a float as input
+    """
+    for suffix in ['', 'K', 'M', 'G', 'T']:
+        if abs(size) < 1024.0:
+            return "{:3.2f} {:}B".format(size, suffix)
+        size /= 1024
+    return "!!!!!!"  # we ain't doin' Petabyte downloads!
+
+#~~~ Background threads  ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+class FetchQueryThread(threading.Thread):
+
+    def __init__(self, params, offset, limit, pgsize=100):
+        self.params = params
+        self.offset = offset
+        self.limit = limit
+        self.pgsize = pgsize    # Apparently not the same for every server
+        self.success = False
+        self.error = "none"
+        threading.Thread.__init__(self)
+
+    def run(self):
+        allresults = []
+        remaining = self.limit
+        pgsize = self.pgsize
+        qresults = []
+        # begin = int(self.params['offset'])
+        # page = 0
+        while remaining > 0:
+            if remaining < pgsize:
+                self.params['limit'] = remaining        # on the last page
+            self.params['offset'] = str(self.offset)
+            qurl = serverurl + '/api?' + urlencode(self.params)
+            qreq = urlreq.Request(qurl, headers={'User-Agent':ua})
+
+            # Fetch
+            try:
+                qresp = urlreq.urlopen(qreq)
+                qoutput = qresp.read().decode()
+            except (URLError, HTTPError) as e:
+                self.success = False
+                self.error = "Fetch Error: " + str(e)
+                exit()
+
+            # Parse
+            try:
+                xroot = ET.fromstring(qoutput)
+                qresults = xroot.findall('./channel/item')
+            except ET.ParseError:
+                self.success = False
+                self.error = "ParseError\n"\
+                           + "Server returned non-XML:\n"\
+                           + qoutput
+                exit()
+            except ValueError as ve:
+                self.success = False
+                self.error = "XML error: " + str(ve) + "\n"\
+                           + "Page: " + str(page) + "\n"\
+                           + "Total Results: " + str(len(allresults))
+                exit()
+
+            # Store
+            for result in qresults:
+                item = {}
+                for k in ['title', 'pubDate', 'link', 'category']:
+                    item[k] = result.find(k).text
+                item['size'] = int(result.find('enclosure').get('length'))
+                item['fetched'] = False
+                allresults.append(item)
+
+            if len(qresults) < pgsize:
+                # either that's all there is,
+                # or the limit has been reached
+                break
+
+            self.offset += pgsize
+            remaining -= pgsize
+        self.results = allresults
+        self.success = True
+
+class FetchNZBThread(threading.Thread):
+    global destdir
+
+    def __init__(self, item):
+        self.url = item['link'].replace('&amp;', '&')
+        self.title = item['title']
+        self.destpath = destdir + item['title'] + '.nzb'
+        self.success = False
+        threading.Thread.__init__(self)
+
+    def run(self):
+        displayqueue.put((write_status, (self.title,)))
+        nzbreq = urlreq.Request(self.url, headers={'User-Agent':ua})
+        try:
+            nzb = urlreq.urlopen(nzbreq)
+            with open(self.destpath, 'wb') as nzbfile:
+                nzbfile.write(nzb.read())
+            self.success = True
+            displayqueue.put((write_status, ('',)))
+        except (URLError, HTTPError) as e:
+            displayqueue.put((write_status, (str(e),)))
+            self.success = False
+
+#~~~ Load Configuration ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+for cf in config_file_paths:
+    if os.path.isfile(cf):
+        configfile = cf
+        break
+else:
+    config_not_found()
+with open(configfile, 'rb') as cf:
+    config = tomllib.load(cf)
+destdir = config['defaults']['DestinationDirectory']
+if not destdir.endswith('/'):
+    destdir = destdir + '/'
+if not os.path.isdir(destdir):
+    os.mkdir(destdir)
+default_max = config['defaults']['MaxResults']
+servers = config['server']
+
+#~~~ Command Line Options  ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+cli_arguments = [ ("query", {'nargs':'*', 'help':"search term[s]"}),
+                  ("-s", "--server", {'choices':list(servers), 'default':list(servers)[0], 'help':"nzb server to query"}),
+                  ("--cat", {'dest':"category", 'help':"category to search or browse"}),
+                  ("-b", "--browse", {'action':"store_true", 'help':"browse categories"}),
+                  ("-l", "--limit", {'type':int, 'default':default_max, 'help':"limit number of results returned"}),
+                  ("-o", "--offset", {'type':int, 'default':0, 'help':"skip the first N results"}),
+                  ("-m", {'action':"store_true", 'dest':"movie", 'help':"search movies"}),
+                  ("--imdb", {'dest':"imdbid", 'help':"imdb.com id (implies -m),"}),
+                  ("--tvdb", {'dest':"tvdbid", 'help':"tvdb.com id  (implies -t),"}),
+                  ("-t", {'action':"store_true", 'dest':"tv", 'help':"search tv shows"}),
+                  ("-S", "--season", {'help':"season number  (requires -t),"}),
+                  ("-E", "--episode", {'help':"episode number  (requires -t & -s),"}),
+                  ("-a", "--anime", {'action':"store_true", 'help':"shorthand for category '5070': Anime"}),
+                  ("--book", {'action':"store_true", 'help':"search books"}),
+                  ("--author", {'nargs':'+', 'help':"author (case insensitive),"}),
+                  ("-c", "--comics", {'action':"store_true", 'help':"shorthand for category '7030': Comics"}),
+                  ("--music", {'action':"store_true", 'help':"search music"}),
+                  ("--artist", {'nargs':'+', 'help':"artist (case insensitive),"}),
+                  ("-r", {'action':"store_true", 'dest':"reverse", 'help':"reverse sort"}),
+                  ("--alpha", {'action':"store_true", 'help':"sort alphabetically"}),
+                  ("--version", "-V", {'action':"store_true", 'help':"report version and exit"}),
+                ]
+clparser = argparse.ArgumentParser(description="query Newznab and compatible servers")
+for clarg in cli_arguments:
+    clparser.add_argument( *clarg[0:-1], **clarg[-1] )
+args = clparser.parse_args()
+
+if args.version:
+    print("getnzbs version " + version)
+    exit(0)
+
+#~~~ Setup Query per Options ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+serverurl, apikey = [ servers[args.server][v] for v in ('URL', 'ApiKey') ]
+
+parameters = {'t': 'search'}
+parameters['apikey'] = apikey
+if args.query:
+    parameters['q'] = ' '.join(args.query)
+
+if args.tv or args.tvdbid:
+    parameters['t'] = 'tvsearch'
+    if args.tvdbid:
+        parameters['tvdbid'] = args.tvdbid
+    if args.season:
+        parameters['season'] = args.season
+        if args.episode:
+            parameters['ep'] = args.episode
+elif args.movie or args.imdbid:
+    parameters['t'] = 'movie'
+    if args.imdbid:
+        if args.imdbid.startswith('tt'):
+            args.imdbid = args.imdbid.lstrip('tt')
+        parameters['imdbid'] = args.imdbid
+elif args.book or args.author:
+    parameters['t'] = 'book'
+    parameters['cat'] = '7020'
+    if args.author:
+        parameters['author'] = ','.join(args.author)
+elif args.music or args.artist:
+    parameters['t'] = 'music'
+    parameters['cat'] = '3010,3040'
+    if args.artist:
+        parameters['artist'] = ','.join(args.artist)
+if args.anime:
+    parameters['cat'] = '5070'
+elif args.comics:
+    parameters['cat'] = '7030'
+elif args.category:
+    parameters['cat'] = args.category
+
+#~~~ Initialize Curses ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+totalscreen = init_screen()
+(headerwin, mainwin, footerwin) = divide_screen(totalscreen)
+if args.browse:
+    choose_category()
+
+#~~~ Retrieve Results ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+pgsize = 75 if ( 'at' in args.server ) else 100
+fetch = FetchQueryThread(parameters, args.offset, args.limit, pgsize)
+fetch.start()
+
+listwin = NzbHeaderListWindow(mainwin, displaylist)
+listwin.draw_window()
+
+query_string = serverurl + '/api?' + urlencode(parameters)
+write_footer(query_string)
+headerwin.addstr(0, 0, "~~~ Please Wait ", curses.color_pair(2))
+while fetch.is_alive():
+    if headerwin.getyx()[1] < (headerwin.getmaxyx()[1] - 1):
+        headerwin.echochar('.', curses.color_pair(2))
+        sleep(.25)
+
+#~~~ Process Results ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+if not fetch.success:
+    demolish_screen(totalscreen)
+    print(fetch.error, file=sys.stderr)
+    exit(1)
+
+results = fetch.results
+if len(results) == 0:
+    demolish_screen(totalscreen)
+    print("No Results.")
+    exit(0)
+if args.alpha:
+    results.sort(key=lambda i: i['title'])
+if args.reverse:
+    results.reverse()
+
+for i in range(len(results)):
+    item = results[i]
+    itemstrings = ['' for i in range(5)]
+    itemstrings[0] = "{:>04d}".format(i+1)                                          # index
+    itemstrings[1] = ' '                                                            # status
+    itemstrings[2] = item['title'].replace('&amp;', '&')                            # title
+    itemstrings[3] = "{:^22}".format(' '.join(item['pubDate'].split(' ')[1:-1]))    # date
+    itemstrings[4] = "{:>10}".format(human(float(item['size'])))                    # size
+    displaylist.append(itemstrings)
+
+write_header("{:03d} Results returned".format(len(results)), 0)
+write_status(' '.join(args.query))
+listwin.new_data(displaylist)
+listwin.draw_list()
+write_footer("Press 'Q' to quit,  'Space' to queue,  'Enter' to retrieve")
+curses.doupdate()
+
+totalscreen.nodelay(False)
+queuemon = threading.Thread(target = monitor_display_queue)
+queuemon.start()
+
+#~~~ Input Loop ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+while True:
+    key = totalscreen.getch()
+    if key == curses.ERR:
+        continue
+    handled = listwin.keypress(key)
+    if not handled:
+        if key in (ord('q'), ord('Q')):
+            displayqueue.put((-1,()))
+            break
+
+        elif key == ord(' '):
+            count = 0
+            total = 0
+            for idx in range(len(results)):
+                if listwin.selected[idx]:
+                    count += 1
+                    total += results[idx]['size']
+            displayqueue.put((write_status, (f'{count} items queued.  Total size:  {human(total)}',)))
+
+        elif key in (ord('\n'), curses.KEY_ENTER):
+            nzbfetch = threading.Thread(target=dispatch_fetch)
+            nzbfetch.start()
+
+        elif key == curses.KEY_RESIZE:
+            (headerwin, mainwin, footerwin) = divide_screen(totalscreen)
+            listwin.colwidths = [4, 1, 0, 22, 11]
+            listwin.draw_window()
+
+        elif key in (ord('r'), ord('R')):
+            listwin.draw_list()
+
+demolish_screen(totalscreen)
