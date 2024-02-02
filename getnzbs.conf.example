@@ -1,0 +1,36 @@
+# Configuration file for getnzbs.py
+
+[defaults]
+
+# Directory to write .nzb files
+# This should be the same directory that nzbget (or another program) polls
+DestinationDirectory = ./nzbs
+
+# Default number of results returned
+# (can be overridden with command line -l option)
+MaxResults = 300
+
+# Servers follow the convention:
+# [[alias]] ( where "alias" is the string to use with command line option -s )
+# URL = https://api.example.com  (api url of the server)
+# ApiKey = 0123456789abcdef0123456789abcdef   (one's personal apikey)
+#           (For servers that don't require an apikey leave value blank)
+# PageSize = optional pagesize - most servers return 100 results per query by default,
+#            but some don't.
+#
+# first server listed will be default
+
+[servers]
+
+    # [[ds]]
+    # URL = https://drunkenslug.com
+    # ApiKey =
+
+    # [[mx]]
+    # URL = https://api.miatrix.com
+    # ApiKey =
+
+    # [[tosho]]
+    # URL = https://feed.animetosho.org
+    # ApiKey =
+    # PageSize = 75
