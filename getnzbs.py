@@ -9,10 +9,11 @@
 # spacebar queues item -- return fetches
 # see "User/Machine Specific" for destination path
 
-import os, sys, tomllib, argparse
+import os, sys, argparse
 import threading, queue
 import curses
 from curseslistwindow import *
+from configobj import ConfigObj as CfgObj
 from time import sleep
 import urllib.request as urlreq
 from urllib.error import *
@@ -20,7 +21,7 @@ from urllib.parse import urlencode
 import xml.etree.ElementTree as ET
 
 #~~~ Constants ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-version = '0.4.4'
+version = '0.4.5'
 ua = 'getnzbs/' + version
 config_file_paths = [ './getnzbs.conf', os.environ['HOME']+'/.config/getnzbs.conf', ]
 
@@ -184,13 +185,15 @@ class NzbHeaderListWindow(MultiColumnListWindow):
 def config_not_found():
     ( txtnorm, txtbold, txtred, txtblue, txtamber, ) = map(lambda s: "\x1b["+s, [ "0m", "1;37m", "1;31m", "1;34m", "33m", ])
     print("Configuration file not found.\n", file=sys.stderr)
-    resp = input(f"Would you like to create one? {txtbold}(y/n){txtnorm}: ")
-    if not resp or resp.lower()[0] != 'y':
-        print("Well, sorry, but no servers are defined, so there's nothing to do.", file=sys.stderr)
-        exit()
-    cfgfile = open('./getnzbs.conf', 'w', encoding='utf-8')
-    cfgfile.write("[defaults]\n")
-    resp = input(f"Please enter the directory path to save nzbs to ({txtbold}default{txtnorm}: {os.environ['HOME']}/Downloads/nzbs/): ")
+    yn = input(f"Would you like to create one? {txtbold}(y/n){txtnorm}: ")
+    if not yn or yn.lower()[0] != 'y':
+        print("Well, sorry, but no servers are defined, so there's nothing to do.\n", file=sys.stderr)
+        return None
+    config = CfgObj()
+    config.filename = config_file_paths[0]
+    config['defaults'] = {}
+    config['servers'] = {}
+    resp = input(f"Please enter the directory path to save nzbs in ({txtbold}default{txtamber} {os.environ['HOME']}/Downloads/nzbs/){txtnorm}: ")
     if not resp:
         destdir = os.environ['HOME'] + '/Downloads/nzbs/'
     elif not os.path.isdir(resp):
@@ -199,32 +202,31 @@ def config_not_found():
             try:
                 os.mkdir(resp)
                 destdir = resp
-            except(Exception):
-                print(f"Error trying to create directory {resp}!\nBailing now.", file=sys.stderr)
-                cfgfile.close()
-                os.remove('./getnzbs.conf')
-                exit()
+            except Exception as exc:
+                print(f"{txtred}Error!{txtnorm} {type(exc)}: trying to create directory {resp}!\n{exc}\n\nBailing now.\n", file=sys.stderr)
+                return None
     else:
         destdir = resp
-    cfgfile.write(f"DestinationDirectory = \"{destdir}\"\n")
+    config['defaults']['DestinationDirectory'] = destdir
     resp = input(f"Please enter the maximum number of results per request ({txtbold}default{txtnorm}: 300): ")
     if not resp:
         maxresults = 300
     elif not resp.isdecimal():
         print(f"{resp} is not a number.  Moving on...")
         maxresults = 100
-    cfgfile.write(f"MaxResults = {maxresults}\n\n")
-    enterserver = ( input(f"Would you like to enter server information? {txtbold}(y/n){txtnorm}?").lower().startswith('y') )
+    config['defaults']['MaxResults'] = maxresults
+    enterserver = ( input(f"Would you like to enter server information? {txtbold}(y/n){txtnorm}? ").lower().startswith('y') )
     while enterserver:
         serv_name = input(f"Please enter a name for the server: ")
         serv_url = input(f"Please enter a valid api url for the server: ")
-        serv_key = input(f"Finally, please enter your api key for the server ({txtbold}default{txtnorm} \"0\"): ")
-        # serv_key = serv_key if serv_key else "0"
-        serv_key = serv_key or "0"
-        cfgfile.write(f"[server.{serv_name}]\nURL = \"{serv_url}\"\nApiKey = \"{serv_key}\"\n\n")
-        enterserver = ( input(f"Would you like to enter another? {txtbold}(y/n){txtnorm}?").lower().startswith('y') )
-    cfgfile.close()
-    exit()
+        serv_key = input(f"Finally, please enter your api key for the server (or hit return): ")
+        serv_key = serv_key or ''
+        config['servers'][serv_name] = {}
+        config['servers'][serv_name]['URL'] = serv_url
+        config['servers'][serv_name]['ApiKey'] = serv_key
+        enterserver = ( input(f"Would you like to enter another? {txtbold}(y/n){txtnorm}? ").lower().startswith('y') )
+    config.write()
+    return config
 
 def dispatch_fetch():
     """
@@ -331,7 +333,8 @@ def human(size):
 #~~~ Background threads  ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 class FetchQueryThread(threading.Thread):
 
-    def __init__(self, params, offset, limit, pgsize=100):
+    def __init__(self, baseurl, params, offset, limit, pgsize=100):
+        self.serverurl = baseurl
         self.params = params
         self.offset = offset
         self.limit = limit
@@ -341,6 +344,7 @@ class FetchQueryThread(threading.Thread):
         threading.Thread.__init__(self)
 
     def run(self):
+        #write_status(f"{self.params['q']} from {self.serverurl}")
         allresults = []
         remaining = self.limit
         pgsize = self.pgsize
@@ -351,7 +355,7 @@ class FetchQueryThread(threading.Thread):
             if remaining < pgsize:
                 self.params['limit'] = remaining        # on the last page
             self.params['offset'] = str(self.offset)
-            qurl = serverurl + '/api?' + urlencode(self.params)
+            qurl = self.serverurl + '/api?' + urlencode(self.params)
             qreq = urlreq.Request(qurl, headers={'User-Agent':ua})
 
             # Fetch
@@ -361,6 +365,10 @@ class FetchQueryThread(threading.Thread):
             except (URLError, HTTPError) as e:
                 self.success = False
                 self.error = "Fetch Error: " + str(e)
+                exit()
+            except Exception as exc:
+                self.success = False
+                self.error = "WTF: "+str(exc)
                 exit()
 
             # Parse
@@ -425,19 +433,24 @@ class FetchNZBThread(threading.Thread):
 #~~~ Load Configuration ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 for cf in config_file_paths:
     if os.path.isfile(cf):
-        configfile = cf
+        config = CfgObj(cf)
         break
 else:
-    config_not_found()
-with open(configfile, 'rb') as cf:
-    config = tomllib.load(cf)
+    config = config_not_found()
+    if not config:
+        exit()
 destdir = config['defaults']['DestinationDirectory']
 if not destdir.endswith('/'):
     destdir = destdir + '/'
 if not os.path.isdir(destdir):
-    os.mkdir(destdir)
-default_max = config['defaults']['MaxResults']
-servers = config['server']
+    try:
+        os.mkdir(destdir)
+    except:
+        print(f"Directory {destdir} does not exist and cannot be created.\n"
+                f"Defaulting to current directory: {os.getcwd()}", file=sys.stderr)
+        destdir = os.getcwd()
+default_max = int(config['defaults']['MaxResults'])
+servers = config['servers']
 
 #~~~ Command Line Options  ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 cli_arguments = [ ("query", {'nargs':'*', 'help':"search term[s]"}),
@@ -472,7 +485,9 @@ if args.version:
     exit(0)
 
 #~~~ Setup Query per Options ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-serverurl, apikey = [ servers[args.server][v] for v in ('URL', 'ApiKey') ]
+server = servers[args.server]
+serverurl, apikey = [ server[v] for v in ('URL', 'ApiKey') ]
+pgsize = int(server['PageSize']) if 'PageSize' in server else 100
 
 parameters = {'t': 'search'}
 parameters['apikey'] = apikey
@@ -517,8 +532,7 @@ if args.browse:
     choose_category()
 
 #~~~ Retrieve Results ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-pgsize = 75 if ( 'at' in args.server ) else 100
-fetch = FetchQueryThread(parameters, args.offset, args.limit, pgsize)
+fetch = FetchQueryThread(serverurl, parameters, args.offset, args.limit, pgsize)
 fetch.start()
 
 listwin = NzbHeaderListWindow(mainwin, displaylist)

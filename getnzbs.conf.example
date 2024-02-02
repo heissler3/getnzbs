@@ -22,15 +22,15 @@ MaxResults = 300
 
 [servers]
 
-    # [[ds]]
-    # URL = https://drunkenslug.com
-    # ApiKey =
+# [[ds]]
+# URL = https://drunkenslug.com
+# ApiKey =
 
-    # [[mx]]
-    # URL = https://api.miatrix.com
-    # ApiKey =
+# [[mx]]
+# URL = https://api.miatrix.com
+# ApiKey =
 
-    # [[tosho]]
-    # URL = https://feed.animetosho.org
-    # ApiKey =
-    # PageSize = 75
+# [[tosho]]
+# URL = https://feed.animetosho.org
+# ApiKey =
+# PageSize = 75
