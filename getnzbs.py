@@ -21,7 +21,7 @@ from urllib.parse import urlencode
 import xml.etree.ElementTree as ET
 
 #~~~ Constants ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-version = '0.4.5'
+version = '0.4.6'
 ua = 'getnzbs/' + version
 config_file_paths = [ './getnzbs.conf', os.environ['HOME']+'/.config/getnzbs.conf', ]
 
@@ -34,6 +34,7 @@ totalscreen = None  # primary curses window
 headerwin = None
 mainwin = None
 footerwin = None
+columns = [4, 1, 0, 22, 11]
 displayqueue = queue.SimpleQueue()
 
 #~~~ Curses functions ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -61,31 +62,33 @@ def init_screen():
 def divide_screen(scr):
     global headerwin, mainwin, footerwin
     scr.clear()
+    headerrows = 2
+    footerrows = 1
     maxrows, maxcols = scr.getmaxyx()
-    subheight = maxrows - 5
+    mainrows = maxrows - (headerrows + footerrows)
     
     if headerwin:
-        headerwin.resize(2, maxcols)
+        headerwin.resize(headerrows, maxcols)
         win1 = headerwin
     else:
-        win1 = curses.newwin(2, maxcols, 0, 0)
+        win1 = curses.newwin(headerrows, maxcols, 0, 0)
         win1.attron(curses.color_pair(1)|curses.A_BOLD)
         win1.bkgd(' ',curses.color_pair(1)|curses.A_BOLD)
-    scr.hline(2, 0, curses.ACS_HLINE, maxcols)
+    # scr.hline(2, 0, curses.ACS_HLINE, maxcols)
 
     if mainwin:
-        mainwin.resize(subheight, maxcols)
+        mainwin.resize(mainrows, maxcols)
         win2 = mainwin
     else:
-        win2 = curses.newwin(subheight, maxcols, 3, 0)
-    scr.hline(maxrows-2, 0, curses.ACS_HLINE, maxcols)
+        win2 = curses.newwin(mainrows, maxcols, headerrows, 0)
+    # scr.hline(maxrows-2, 0, curses.ACS_HLINE, maxcols)
 
     if footerwin:
-        footerwin.resize(1, maxcols)
+        footerwin.resize(footerrows, maxcols)
         footerwin.mvwin(maxrows-1, 0)
         win3 = footerwin
     else:
-        win3 = curses.newwin(1, maxcols, maxrows-1, 0)
+        win3 = curses.newwin(footerrows, maxcols, maxrows-1, 0)
     
     scr.refresh()
     return win1, win2, win3
@@ -134,8 +137,8 @@ class NzbHeaderListWindow(MultiColumnListWindow):
     so there is some redundancy.
     """
 
-    def __init__(self, window, data, colwidths=[4, 1, 0, 22, 11]):
-        super().__init__(window, data, colwidths)
+    def __init__(self, window, data):
+        super().__init__(window, data, columns, True)
         self.fetched = [False for x in range(len(data))]
 
     def write_row(self, index):
@@ -167,6 +170,8 @@ class NzbHeaderListWindow(MultiColumnListWindow):
 
     def new_data(self, data):
         super().new_data(data)
+        if self.drawborder:
+            self.line_count -= 2
         self.fetched = [False for x in range(len(data))]
 
     def write_status_spinner(self, index, thread):
@@ -574,6 +579,7 @@ for i in range(len(results)):
 
 write_header("{:03d} Results returned".format(len(results)), 0)
 write_status(' '.join(args.query))
+
 listwin.new_data(displaylist)
 listwin.draw_list()
 write_footer("Press 'Q' to quit,  'Space' to queue,  'Enter' to retrieve")
