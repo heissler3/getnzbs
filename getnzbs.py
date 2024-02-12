@@ -138,7 +138,7 @@ class NzbHeaderListWindow(MultiColumnListWindow):
     """
 
     def __init__(self, window, data):
-        super().__init__(window, data, columns, True)
+        super().__init__(window, data, colwidths=columns)
         self.fetched = [False for x in range(len(data))]
 
     def write_row(self, index):
@@ -169,10 +169,14 @@ class NzbHeaderListWindow(MultiColumnListWindow):
                 self.subwin[n].insch(details[n], attr)
 
     def new_data(self, data):
-        super().new_data(data)
-        if self.drawborder:
-            self.line_count -= 2
+        self.list = data
+        self.list_length = len(data)
+        self.selected = [False for x in range(self.list_length)]
         self.fetched = [False for x in range(len(data))]
+        maxrows = self.win.getmaxyx()[0]
+        if self.drawborder:
+            maxrows -= 2
+        self.line_count = min(self.list_length, maxrows)
 
     def write_status_spinner(self, index, thread):
         i = 0
@@ -582,6 +586,7 @@ write_status(' '.join(args.query))
 
 listwin.new_data(displaylist)
 listwin.draw_list()
+write_status("DrawBorder: "+str(listwin.drawborder)+"   LineCount: "+str(listwin.line_count)+"  dy, dx: "+str(listwin.dy)+", "+str(listwin.dx))
 write_footer("Press 'Q' to quit,  'Space' to queue,  'Enter' to retrieve")
 curses.doupdate()
 
