@@ -1,13 +1,20 @@
 #!/usr/bin/env python3
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+# getnzbs.py
+#
 # Henry Eissler III
+# version: 0.4.8
+# 1/18/2025
 #
 # query Newznab servers
 # (see getnzbs.py --help for query options)
 #
 # uses ncurses interface.  120 columns or more preferred
 # spacebar queues item -- return fetches
-# see "User/Machine Specific" for destination path
+#
+# non-standard requirements:
+#   - curseslistwindow  <https://github.com/heissler3/curseslistwindow>
+#   - configobj         <https://pypi.org/project/configobj/>
 
 import os, sys, argparse
 import threading, queue
@@ -21,8 +28,8 @@ from urllib.parse import urlencode
 import xml.etree.ElementTree as ET
 
 #~~~ Constants ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-version = '0.4.6'
-ua = 'getnzbs/' + version
+version = '0.4.8'
+ua = 'getnzbs/' + version   # UserAgent HTTP header value
 config_file_paths = [ './getnzbs.conf', os.environ['HOME']+'/.config/getnzbs.conf', ]
 
 #~~~ Globals ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -31,8 +38,9 @@ results = []        # query results - a list of dicts
                     #         'category', 'size', 'fetched'
 displaylist = []    # strings (or chars) to display
 totalscreen = None  # primary curses window
-headerwin = None
 mainwin = None
+headerwin = None
+listwin = None
 footerwin = None
 columns = [4, 1, 0, 22, 11]
 displayqueue = queue.SimpleQueue()
@@ -45,14 +53,21 @@ def init_screen():
     scr.keypad(True)
     if curses.has_colors():
         curses.start_color()
-        curses.init_pair(1, curses.COLOR_WHITE,
-                            curses.COLOR_BLUE)
-        curses.init_pair(2, curses.COLOR_WHITE,
-                            curses.COLOR_RED)
-        curses.init_pair(3, curses.COLOR_YELLOW,
-                            curses.COLOR_BLUE)
-        curses.init_pair(4, curses.COLOR_YELLOW,
-                            curses.COLOR_BLACK)
+        """
+        deciding which pair(s) should be used by the ListWindow class
+        and which should be application specific...
+
+        """
+        curses.init_pair(1, curses.COLOR_WHITE,     # header & status messages
+                            curses.COLOR_BLUE)      #
+        curses.init_pair(2, curses.COLOR_WHITE,     # "please wait..." & (fetched && current line)
+                            curses.COLOR_RED)       #
+        curses.init_pair(3, curses.COLOR_YELLOW,    # current line
+                            curses.COLOR_BLUE)      #
+        curses.init_pair(4, curses.COLOR_YELLOW,    # fetched & alert messages
+                            curses.COLOR_BLACK)     #
+        curses.init_pair(5, curses.COLOR_RED,       # alert border
+                            curses.COLOR_BLACK)     #
     curses.curs_set(0)
     #curses.mousemask(0x00210002) # BUTTON1_PRESSED | scrollup | scrolldown
     curses.mousemask(curses.ALL_MOUSE_EVENTS)
@@ -109,14 +124,14 @@ def write_header(message, attr):
     headerwin.refresh()    
 
 def write_status(status):
-    """ for debugging purposes only
+    """
+    for debugging purposes only
     """
     global headerwin
     maxcol = headerwin.getmaxyx()[1] - 1
     headerwin.move(1, 0)
     headerwin.clrtoeol()
     if len(status) < maxcol:
-        #headerwin.addstr(1, maxcol - len(status) - 1, status, curses.A_BOLD)
         headerwin.addstr(1, 1, status, curses.A_BOLD)
         headerwin.refresh()
 
@@ -126,6 +141,38 @@ def write_footer(message):
     footerwin.addstr(footerline, 5, message)
     footerwin.clrtoeol()
     footerwin.refresh()
+
+def display_alert(messages):
+    """
+    Display an alert (red border, yellow text)
+                     (colorpair 5, colorpair 4)
+        in the center of the screen
+        and return a single key char response.
+    1 parameter, messages, is a list of strings
+        to display
+    """
+    global totalscreen
+    (my, mx) = totalscreen.getmaxyx()
+    cy = int(my/2)
+    cx = int(mx/2)
+    aheight = len(messages) + 4
+    awidth = max(map(len, messages)) + 4
+    atop = cy - int(aheight/2)
+    aleft = cx - int(awidth/2)
+    alert = curses.newwin(aheight, awidth, atop, aleft)
+    alert.attron(curses.color_pair(5))
+    alert.box()
+    alert.attroff(curses.color_pair(5))
+    alert.bkgd(' ', curses.color_pair(-1))
+    alert.attron(curses.color_pair(4))
+    for (i, msg) in enumerate(messages):
+        x = int((awidth/2) - (len(msg)/2))
+        alert.addstr( 2+i, x, msg )
+    alert.attroff(curses.color_pair(4))
+    alert.refresh()
+    response = totalscreen.getch()
+    alert.erase()
+    return chr(response)
 
 #~~~ Curses Objects ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 class NzbHeaderListWindow(MultiColumnListWindow):
@@ -275,6 +322,10 @@ def monitor_display_queue():
         curses.doupdate()
 
 def choose_category():
+    """
+    called if the user chose -b or --browse option
+    instead of a search query
+    """
     global listwin, mainwin, parameters, displaylist
     categories = []
 
@@ -282,7 +333,7 @@ def choose_category():
     listwin.draw_window()
     write_status("Retrieving Category List")
 
-    capsquery = servers[args.server]['url'] + '/api?' + urlencode({'t':'caps','apikey':servers[args.server]['key']})
+    capsquery = servers[args.server]['URL'] + '/api?' + urlencode({'t':'caps','apikey':servers[args.server]['ApiKey']})
     capsrequest = urlreq.Request(capsquery, headers={'User-Agent':ua})
 
     try:
@@ -338,6 +389,35 @@ def human(size):
             return "{:3.2f} {:}B".format(size, suffix)
         size /= 1024
     return "!!!!!!"  # we ain't doin' Petabyte downloads!
+
+def choose_to_exit():
+    """
+    Once the user presses 'Q'
+    check if there's anything in the download queue
+    and if so warn them first
+    """
+    global listwin
+    count = 0
+    for idx in range(len(results)):
+        if listwin.selected[idx]:
+            count += 1
+    if count == 0:
+        quit_this(0)
+    else:
+        msgs = [ f"{count} items are queued.", "Are you sure? [Y/N]" ]
+        response = display_alert(msgs)
+        if ( response in ['Y', 'y'] ):    
+            quit_this(count)
+        # else:
+        listwin.draw_window()
+
+def quit_this(status):
+    """
+    Actually close the app
+    """
+    displayqueue.put((-1,()))
+    demolish_screen(totalscreen)
+    exit(status)
 
 #~~~ Background threads  ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 class FetchQueryThread(threading.Thread):
@@ -586,7 +666,8 @@ write_status(' '.join(args.query))
 
 listwin.new_data(displaylist)
 listwin.draw_list()
-write_status("DrawBorder: "+str(listwin.drawborder)+"   LineCount: "+str(listwin.line_count)+"  dy, dx: "+str(listwin.dy)+", "+str(listwin.dx))
+write_status(f"{serverurl}:  {args.query}")
+#write_status("DrawBorder: "+str(listwin.drawborder)+"   LineCount: "+str(listwin.line_count)+"  dy, dx: "+str(listwin.dy)+", "+str(listwin.dx))
 write_footer("Press 'Q' to quit,  'Space' to queue,  'Enter' to retrieve")
 curses.doupdate()
 
@@ -602,8 +683,7 @@ while True:
     handled = listwin.keypress(key)
     if not handled:
         if key in (ord('q'), ord('Q')):
-            displayqueue.put((-1,()))
-            break
+            choose_to_exit()
 
         elif key == ord(' '):
             count = 0
@@ -625,5 +705,3 @@ while True:
 
         elif key in (ord('r'), ord('R')):
             listwin.draw_list()
-
-demolish_screen(totalscreen)
