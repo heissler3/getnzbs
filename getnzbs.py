@@ -3,7 +3,7 @@
 # getnzbs.py
 #
 # Henry Eissler III
-# version: 0.4.8
+# version: 0.4.9
 # 1/18/2025
 #
 # query Newznab servers
@@ -28,7 +28,7 @@ from urllib.parse import urlencode
 import xml.etree.ElementTree as ET
 
 #~~~ Constants ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-version = '0.4.8'
+version = '0.4.9'
 ua = 'getnzbs/' + version   # UserAgent HTTP header value
 config_file_paths = [ './getnzbs.conf', os.environ['HOME']+'/.config/getnzbs.conf', ]
 
@@ -53,21 +53,18 @@ def init_screen():
     scr.keypad(True)
     if curses.has_colors():
         curses.start_color()
-        """
-        deciding which pair(s) should be used by the ListWindow class
-        and which should be application specific...
-
-        """
+        # color pairs 13 - 15 are used and defined by curseslistwindow
+        # the following are specific to this app
         curses.init_pair(1, curses.COLOR_WHITE,     # header & status messages
-                            curses.COLOR_BLUE)      #
-        curses.init_pair(2, curses.COLOR_WHITE,     # "please wait..." & (fetched && current line)
-                            curses.COLOR_RED)       #
-        curses.init_pair(3, curses.COLOR_YELLOW,    # current line
-                            curses.COLOR_BLUE)      #
+                            curses.COLOR_BLUE)
+        curses.init_pair(2, curses.COLOR_WHITE,     # "please wait..."
+                            curses.COLOR_RED)
         curses.init_pair(4, curses.COLOR_YELLOW,    # fetched & alert messages
-                            curses.COLOR_BLACK)     #
+                            curses.COLOR_BLACK)
         curses.init_pair(5, curses.COLOR_RED,       # alert border
-                            curses.COLOR_BLACK)     #
+                            curses.COLOR_BLACK)
+        curses.init_pair(12, curses.COLOR_BLACK,     # fetched && current
+                             curses.COLOR_YELLOW)
     curses.curs_set(0)
     #curses.mousemask(0x00210002) # BUTTON1_PRESSED | scrollup | scrolldown
     curses.mousemask(curses.ALL_MOUSE_EVENTS)
@@ -193,16 +190,19 @@ class NzbHeaderListWindow(MultiColumnListWindow):
         line = index - self.offset
         if line < 0 or line > (self.line_count - 1):
             return
-        attr = (curses.color_pair(3)|curses.A_BOLD) if (index == self.current) else 0
+        attr = (curses.color_pair(13)|curses.A_BOLD) if (index == self.current) else 0
         if self.fetched[index]:
             details[1] = 'X'
             if index != self.current:
-                attr |= curses.color_pair(4)
+                attr = curses.color_pair(4)
             else:
-                attr = (curses.color_pair(2) | curses.A_BOLD)
+                attr = curses.color_pair(12)|curses.A_BOLD
         elif self.selected[index]:
             details[1] = '-'
-            attr |= curses.A_BOLD
+            if index == self.current:
+                attr = curses.color_pair(14)|curses.A_BOLD
+            else:
+                attr = curses.color_pair(15)|curses.A_BOLD
         else:
             details[1] = ' '
         for n in range(self.numcols):
