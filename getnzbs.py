@@ -65,6 +65,10 @@ def init_screen():
                             curses.COLOR_BLACK)
         curses.init_pair(12, curses.COLOR_BLACK,     # fetched && current
                              curses.COLOR_YELLOW)
+        curses.init_pair(14, curses.COLOR_GREEN,
+                             curses.COLOR_BLUE)     # overriding module pairs
+        curses.init_pair(15, curses.COLOR_GREEN,
+                             curses.COLOR_BLACK)
     curses.curs_set(0)
     #curses.mousemask(0x00210002) # BUTTON1_PRESSED | scrollup | scrolldown
     curses.mousemask(curses.ALL_MOUSE_EVENTS)
