@@ -17,10 +17,11 @@
 #   - configobj         <https://pypi.org/project/configobj/>
 
 import os, sys, argparse
+# from configobj import ConfigObj as CfgObj
+import tomllib
 import threading, queue
 import curses
 from curseslistwindow import *
-from configobj import ConfigObj as CfgObj
 from time import sleep
 import urllib.request as urlreq
 from urllib.error import *
@@ -30,7 +31,7 @@ import xml.etree.ElementTree as ET
 #~~~ Constants ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 version = '0.4.9'
 ua = 'getnzbs/' + version   # UserAgent HTTP header value
-config_file_paths = [ './getnzbs.conf', os.environ['HOME']+'/.config/getnzbs.conf', ]
+config_file_paths = [ './getnzbs.toml', os.environ['XDG_CONFIG_HOME']+'/getnzbs.toml', ]
 
 #~~~ Globals ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 results = []        # query results - a list of dicts
@@ -44,7 +45,6 @@ listwin = None
 footerwin = None
 columns = [4, 1, 0, 22, 11]
 displayqueue = queue.SimpleQueue()
-
 #~~~ Curses functions ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 def init_screen():
     scr = curses.initscr()
@@ -249,7 +249,7 @@ def config_not_found():
     if not yn or yn.lower()[0] != 'y':
         print("Well, sorry, but no servers are defined, so there's nothing to do.\n", file=sys.stderr)
         return None
-    config = CfgObj()
+    config = {}
     config.filename = config_file_paths[0]
     config['defaults'] = {}
     config['servers'] = {}
@@ -267,14 +267,14 @@ def config_not_found():
                 return None
     else:
         destdir = resp
-    config['defaults']['DestinationDirectory'] = destdir
+    config['defaults']['destination_directory'] = destdir
     resp = input(f"Please enter the maximum number of results per request ({txtbold}default{txtnorm}: 300): ")
     if not resp:
         maxresults = 300
     elif not resp.isdecimal():
         print(f"{resp} is not a number.  Moving on...")
         maxresults = 100
-    config['defaults']['MaxResults'] = maxresults
+    config['defaults']['max_results'] = maxresults
     enterserver = ( input(f"Would you like to enter server information? {txtbold}(y/n){txtnorm}? ").lower().startswith('y') )
     while enterserver:
         serv_name = input(f"Please enter a name for the server: ")
@@ -282,10 +282,10 @@ def config_not_found():
         serv_key = input(f"Finally, please enter your api key for the server (or hit return): ")
         serv_key = serv_key or ''
         config['servers'][serv_name] = {}
-        config['servers'][serv_name]['URL'] = serv_url
-        config['servers'][serv_name]['ApiKey'] = serv_key
+        config['servers'][serv_name]['url'] = serv_url
+        config['servers'][serv_name]['apikey'] = serv_key
         enterserver = ( input(f"Would you like to enter another? {txtbold}(y/n){txtnorm}? ").lower().startswith('y') )
-    config.write()
+
     return config
 
 def dispatch_fetch():
@@ -526,13 +526,14 @@ class FetchNZBThread(threading.Thread):
 #~~~ Load Configuration ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 for cf in config_file_paths:
     if os.path.isfile(cf):
-        config = CfgObj(cf)
+        with open(cf, 'rb') as conffile:
+            config = tomllib.load(conffile)
         break
 else:
     config = config_not_found()
     if not config:
         exit()
-destdir = config['defaults']['DestinationDirectory']
+destdir = config['defaults']['destination_directory']
 if not destdir.endswith('/'):
     destdir = destdir + '/'
 if not os.path.isdir(destdir):
@@ -542,7 +543,7 @@ if not os.path.isdir(destdir):
         print(f"Directory {destdir} does not exist and cannot be created.\n"
                 f"Defaulting to current directory: {os.getcwd()}", file=sys.stderr)
         destdir = os.getcwd()
-default_max = int(config['defaults']['MaxResults'])
+default_max = int(config['defaults']['max_results'])
 servers = config['servers']
 
 #~~~ Command Line Options  ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -579,8 +580,8 @@ if args.version:
 
 #~~~ Setup Query per Options ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 server = servers[args.server]
-serverurl, apikey = [ server[v] for v in ('URL', 'ApiKey') ]
-pgsize = int(server['PageSize']) if 'PageSize' in server else 100
+serverurl, apikey = [ server[v] for v in ('url', 'apikey') ]
+pgsize = int(server['pagesize']) if 'pagesize' in server else 100
 
 parameters = {'t': 'search'}
 parameters['apikey'] = apikey
