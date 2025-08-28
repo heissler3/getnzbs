@@ -31,7 +31,7 @@ import xml.etree.ElementTree as ET
 #~~~ Constants ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 version = '0.4.10'
 ua = 'getnzbs/' + version   # UserAgent HTTP header value
-config_file_paths = [ './getnzbs.toml', os.environ['XDG_CONFIG_HOME']+'/getnzbs.toml', ]
+config_file_paths = [ './getnzbs.toml', os.environ['HOME']+'/.config/getnzbs.toml', ]
 
 #~~~ Globals ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 results = []        # query results - a list of dicts
