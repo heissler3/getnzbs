@@ -1,0 +1,33 @@
+# Configuration file for getnzbs.py
+
+[defaults]
+# These should be fairly self-explanatory
+
+# Directory to write .nzb files
+# This should be the same directory that nzbget (or another program) polls
+destination_directory = "./nzbs"
+
+# Default number of results returned
+# (can be overridden with command line -l option)
+max_results = 300
+
+[servers]
+# Servers follow the convention:
+# [servers.alias]
+# url = "http[s]://api.example.com"
+# apikey = "0123456789abcdef0123456789abcdef"
+
+# first server listed will be default
+
+[servers.ds]
+url = "https://drunkenslug.com"
+apikey = "0123456789abcdef0123456789abcdef"
+
+[servers.noob]
+url = "https://nzbnoob.com"
+apikey = "0123456789abcdef0123456789abcdef"
+
+[servers.tosho]
+url = "https://feed.animetosho.org"
+apikey = ""
+pagesize = 75

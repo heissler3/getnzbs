@@ -3,8 +3,8 @@
 # getnzbs.py
 #
 # Henry Eissler III
-# version: 0.4.9
-# 1/18/2025
+# version: 0.4.10
+# 8/28/2025
 #
 # query Newznab servers
 # (see getnzbs.py --help for query options)
@@ -29,7 +29,7 @@ from urllib.parse import urlencode
 import xml.etree.ElementTree as ET
 
 #~~~ Constants ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-version = '0.4.9'
+version = '0.4.10'
 ua = 'getnzbs/' + version   # UserAgent HTTP header value
 config_file_paths = [ './getnzbs.toml', os.environ['XDG_CONFIG_HOME']+'/getnzbs.toml', ]
 
@@ -245,19 +245,18 @@ class NzbHeaderListWindow(MultiColumnListWindow):
 def config_not_found():
     ( txtnorm, txtbold, txtred, txtblue, txtamber, ) = map(lambda s: "\x1b["+s, [ "0m", "1;37m", "1;31m", "1;34m", "33m", ])
     print("Configuration file not found.\n", file=sys.stderr)
-    yn = input(f"Would you like to create one? {txtbold}(y/n){txtnorm}: ")
+    yn = input(f"Would you like to create one? {txtbold}[y|n]{txtnorm}: ")
     if not yn or yn.lower()[0] != 'y':
         print("Well, sorry, but no servers are defined, so there's nothing to do.\n", file=sys.stderr)
         return None
     config = {}
-    config.filename = config_file_paths[0]
     config['defaults'] = {}
     config['servers'] = {}
     resp = input(f"Please enter the directory path to save nzbs in ({txtbold}default{txtamber} {os.environ['HOME']}/Downloads/nzbs/){txtnorm}: ")
     if not resp:
         destdir = os.environ['HOME'] + '/Downloads/nzbs/'
     elif not os.path.isdir(resp):
-        yn = input(f"Sorry, {resp} directory does not exist.  Create it? {txtbold}(y/n){txtnorm}: ")
+        yn = input(f"Sorry, {resp} directory does not exist.  Create it? {txtbold}[y|n]{txtnorm}: ")
         if yn and yn.lower()[0] == 'y':
             try:
                 os.mkdir(resp)
@@ -265,6 +264,10 @@ def config_not_found():
             except Exception as exc:
                 print(f"{txtred}Error!{txtnorm} {type(exc)}: trying to create directory {resp}!\n{exc}\n\nBailing now.\n", file=sys.stderr)
                 return None
+        else:
+            """ should loop back here """
+            print("Aborting")
+            exit(1)
     else:
         destdir = resp
     config['defaults']['destination_directory'] = destdir
@@ -274,19 +277,44 @@ def config_not_found():
     elif not resp.isdecimal():
         print(f"{resp} is not a number.  Moving on...")
         maxresults = 100
+    else:
+        maxresults = int(resp)
     config['defaults']['max_results'] = maxresults
-    enterserver = ( input(f"Would you like to enter server information? {txtbold}(y/n){txtnorm}? ").lower().startswith('y') )
+    enterserver = ( input(f"Would you like to enter server information? {txtbold}[y|n]{txtnorm}? ").lower().startswith('y') )
     while enterserver:
         serv_name = input(f"Please enter a name for the server: ")
         serv_url = input(f"Please enter a valid api url for the server: ")
         serv_key = input(f"Finally, please enter your api key for the server (or hit return): ")
         serv_key = serv_key or ''
-        config['servers'][serv_name] = {}
-        config['servers'][serv_name]['url'] = serv_url
-        config['servers'][serv_name]['apikey'] = serv_key
-        enterserver = ( input(f"Would you like to enter another? {txtbold}(y/n){txtnorm}? ").lower().startswith('y') )
-
+        config['servers'][serv_name] = { 'url': serv_url, 'apikey': serv_key }
+        enterserver = ( input(f"Would you like to enter another? {txtbold}[y|n]{txtnorm}? ").lower().startswith('y') )
+    write_config_file(config)
     return config
+
+def write_config_file(config):
+    """
+    It should probably be pointed out that this function could be avoided
+    if we were willing to require the 'toml' library
+    instead of the 'tomllib' standard library
+    """
+    outstring = "[defaults]\n"
+    for k in config['defaults'].keys():
+        if type(config['defaults'][k]) == str:
+            outstring += k + " = \"" + config['defaults'][k] + "\"\n"
+        else:
+            outstring += k + " = " + str(config['defaults'][k]) + "\n"
+    outstring += "\n[servers]\n"
+    for s in config['servers'].keys():
+        outstring += "[servers." + s + "]\n"
+        for k in config['servers'][s].keys():
+            if type(config['servers'][s][k]) == str:
+                outstring += k + " = \"" + config['servers'][s][k] + "\"\n"
+            else:
+                outstring += k + " = " + str(config['servers'][s][k]) + "\n"
+        outstring += "\n"
+    with open(config_file_paths[0], 'w') as configfile:
+        configfile.write(outstring)
+    print(config_file_paths[0] + " written.\n")
 
 def dispatch_fetch():
     """
