@@ -16,7 +16,7 @@
 #   - curseslistwindow  <https://github.com/heissler3/curseslistwindow>
 #   - configobj         <https://pypi.org/project/configobj/>
 
-import os, sys, argparse
+import os, sys, argparse, re
 # from configobj import ConfigObj as CfgObj
 import tomllib
 import threading, queue
@@ -365,7 +365,7 @@ def choose_category():
     listwin.draw_window()
     write_status("Retrieving Category List")
 
-    capsquery = servers[args.server]['URL'] + '/api?' + urlencode({'t':'caps','apikey':servers[args.server]['ApiKey']})
+    capsquery = servers[args.server]['url'] + '/api?' + urlencode({'t':'caps','apikey':servers[args.server]['apikey']})
     capsrequest = urlreq.Request(capsquery, headers={'User-Agent':ua})
 
     try:
@@ -529,12 +529,13 @@ class FetchQueryThread(threading.Thread):
         self.success = True
 
 class FetchNZBThread(threading.Thread):
-    global destdir
+    global destdir, ua
 
     def __init__(self, item):
         self.url = item['link'].replace('&amp;', '&')
         self.title = item['title']
-        self.destpath = destdir + item['title'] + '.nzb'
+        safefn = re.sub(r'[/\\|&?%*:\"]', '', self.title)
+        self.destpath = destdir + safefn + '.nzb'
         self.success = False
         threading.Thread.__init__(self)
 
